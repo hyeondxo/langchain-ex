@@ -9,9 +9,17 @@
 ### 1. 자동 로깅
 챗봇 실행 시 자동으로 다음 정보를 기록합니다:
 
+- **벡터 DB 정보**: 저장된 총 청크 수, 임베딩 모델, 컬렉션 이름
 - **사용자 입력**: 원본 프롬프트
-- **문서 검색**: 검색된 문서 청크 정보 (내용, 메타데이터)
-- **컨텍스트 준비**: LLM에 전달되는 포맷된 컨텍스트
+- **문서 검색**:
+  - 검색 쿼리
+  - Top-N 청크 정보 (랭킹, 내용, 메타데이터)
+  - 유사도 점수 (있는 경우)
+  - 검색 품질 메트릭 (평균/최소/최대 청크 크기, 총 컨텍스트 크기)
+- **컨텍스트 준비**:
+  - LLM에 전달되는 포맷된 컨텍스트
+  - 청크 사용 흐름 (각 청크가 어떻게 사용되었는지)
+  - 청크별 소스 파일 및 페이지 정보
 - **LLM 요청**: 모델명, 파라미터, 프롬프트
 - **LLM 응답**: 생성된 답변, 처리 시간
 - **성능 메트릭**: 전체 처리 시간, LLM 응답 시간
@@ -93,16 +101,36 @@ python chatbot.py
       User input received
 
   [2] RETRIEVAL (15:30:51)
-      Retrieved 4 documents
-      Retrieved 4 documents
-        - Doc 0: VM은 Virtual Machine의 약자로, 하드웨어를...
-        - Doc 1: 가상머신은 물리적 컴퓨터 위에서 실행되는...
-        - Doc 2: VM의 주요 장점은 리소스 활용 효율성...
+      Retrieved top-4 documents from vector DB
+      Query: VM이란 무엇인가요?
+      Metrics:
+        - Avg chunk size: 712.5 chars
+        - Total context: 2850 chars
+        - Min/Max chunk: 450/980 chars
+      Documents:
+        [1] Chunk 0 (856 chars)
+            Source: docs/vm_guide.pdf, Page: 1
+            Preview: VM은 Virtual Machine의 약자로, 하드웨어를 소프트웨어로...
+        [2] Chunk 1 (720 chars)
+            Source: docs/vm_guide.pdf, Page: 2
+            Preview: 가상머신은 물리적 컴퓨터 위에서 실행되는...
+        [3] Chunk 2 (694 chars)
+            Source: docs/vm_guide.pdf, Page: 3
+            Preview: VM의 주요 장점은 리소스 활용 효율성...
 
   [3] CONTEXT_PREP (15:30:51)
-      Context formatted for LLM
+      Context formatted for LLM with chunk flow tracking
       Context length: 2847 chars
-      Preview: [문서 1]
+      Chunk Usage Flow:
+        [1] Chunk 0: 856 chars
+            Source: docs/vm_guide.pdf, Page: 1
+            Usage: Included in context as Document 1
+            Position: Document 1 of 4
+        [2] Chunk 1: 720 chars
+            Source: docs/vm_guide.pdf, Page: 2
+            Usage: Included in context as Document 2
+            Position: Document 2 of 4
+      Context Preview: [문서 1]
 VM은 Virtual Machine의 약자로...
 
   [4] LLM_REQUEST (15:30:51)
@@ -191,29 +219,51 @@ python view_logs.py
         },
         {
           "step_type": "RETRIEVAL",
-          "description": "Retrieved 4 documents",
+          "description": "Retrieved top-4 documents from vector DB",
           "timestamp": "2025-01-26T15:30:51.234567",
           "data": {
+            "query": "VM이란 무엇인가요?",
             "num_documents": 4,
             "search_params": {"k": 4},
             "documents": [
               {
+                "rank": 1,
                 "index": 0,
                 "content_preview": "VM은 Virtual Machine의 약자로...",
                 "content_length": 856,
-                "metadata": {"source": "docs/vm_guide.pdf", "page": 1}
+                "full_content": "VM은 Virtual Machine의 약자로...",
+                "metadata": {"source": "docs/vm_guide.pdf", "page": 1},
+                "similarity_score": null
               }
-            ]
+            ],
+            "metrics": {
+              "avg_chunk_size": 712.5,
+              "total_context_size": 2850,
+              "min_chunk_size": 450,
+              "max_chunk_size": 980
+            }
           }
         },
         {
           "step_type": "CONTEXT_PREP",
-          "description": "Context formatted for LLM",
+          "description": "Context formatted for LLM with chunk flow tracking",
           "timestamp": "2025-01-26T15:30:51.345678",
           "data": {
             "context_length": 2847,
             "context_preview": "[문서 1]\nVM은...",
-            "full_context": "[문서 1]\nVM은 Virtual Machine..."
+            "full_context": "[문서 1]\nVM은 Virtual Machine...",
+            "chunk_usage_flow": [
+              {
+                "chunk_index": 0,
+                "rank": 1,
+                "source": "docs/vm_guide.pdf",
+                "page": 1,
+                "chunk_size": 856,
+                "usage": "Included in context as Document 1",
+                "position_in_context": "Document 1 of 4"
+              }
+            ],
+            "num_chunks_used": 4
           }
         },
         {
@@ -300,7 +350,36 @@ A: `chatbot_logger.py`의 로깅 메서드를 수정하여 특정 필드를 필�
 ## 활용 사례
 
 1. **디버깅**: 챗봇이 잘못된 답변을 한 경우, 어떤 문서가 검색되었는지 확인
-2. **성능 분석**: 처리 시간 메트릭을 통해 병목 지점 파악
-3. **품질 개선**: 검색된 문서와 실제 답변의 관계 분석
-4. **사용 패턴 분석**: 사용자가 자주 묻는 질문 유형 파악
-5. **에러 분석**: 실패한 쿼리의 원인 분석 및 개선
+   - 검색된 청크의 랭킹과 내용 확인
+   - 청크 크기가 너무 작거나 큰지 메트릭으로 파악
+   - 소스 파일과 페이지 번호로 원본 문서 추적
+
+2. **검색 품질 분석**: 벡터 검색이 적절한 문서를 찾았는지 평가
+   - Top-N 청크의 관련성 확인
+   - 평균 청크 크기가 적절한지 검토 (너무 작으면 컨텍스트 부족)
+   - 총 컨텍스트 크기가 LLM에 충분한지 확인
+
+3. **청크 분할 최적화**: 청크 크기 조정이 필요한지 판단
+   - 최소/최대 청크 크기 메트릭 활용
+   - 너무 작은 청크(< 100자)는 의미 없는 정보일 가능성
+   - 너무 큰 청크(> 2000자)는 분할 필요
+
+4. **성능 분석**: 처리 시간 메트릭을 통해 병목 지점 파악
+   - 검색 시간 vs LLM 처리 시간 비교
+   - 청크 수(k값) 조정으로 성능 튜닝
+
+5. **품질 개선**: 검색된 문서와 실제 답변의 관계 분석
+   - 청크 사용 흐름으로 어떤 청크가 답변에 기여했는지 추적
+   - 불필요한 청크가 포함되었는지 확인
+
+6. **사용 패턴 분석**: 사용자가 자주 묻는 질문 유형 파악
+   - 검색 쿼리 패턴 분석
+   - 자주 검색되는 문서 영역 파악
+
+7. **벡터 DB 관리**: 저장된 청크 정보 모니터링
+   - 총 청크 수 추적
+   - 임베딩 모델 버전 관리
+
+8. **에러 분석**: 실패한 쿼리의 원인 분석 및 개선
+   - 검색 실패 시 쿼리와 청크 내용 분석
+   - PDF 파싱 문제 발견 (청크가 너무 짧은 경우)
