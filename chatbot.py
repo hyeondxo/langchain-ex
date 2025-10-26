@@ -17,6 +17,7 @@ load_dotenv()
 import os
 import glob
 import sys
+import time
 from typing import List, Optional
 
 # LangChain 핵심 컴포넌트
@@ -31,6 +32,9 @@ from langchain_core.documents import Document
 # 문서 로더
 from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader, TextLoader
 
+# 로깅 시스템
+from chatbot_logger import ChatbotLogger, LogViewer
+
 
 # ============================================================
 # 문서 처리 클래스
@@ -39,16 +43,18 @@ from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader, Tex
 class DocumentProcessor:
     """문서 로드 및 청크 분할을 담당하는 클래스"""
 
-    def __init__(self, docs_dir: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150):
+    def __init__(self, docs_dir: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150, logger: Optional[ChatbotLogger] = None):
         """
         Args:
             docs_dir: 문서가 저장된 디렉토리 경로
             chunk_size: 각 청크의 최대 문자 수
             chunk_overlap: 인접 청크 간 중복 문자 수
+            logger: 로깅 시스템 (선택적)
         """
         self.docs_dir = docs_dir
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.logger = logger
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
@@ -201,7 +207,8 @@ class RAGChatbot:
         vectorstore_manager: VectorStoreManager,
         model: str = "gpt-4o-mini",
         retrieval_k: int = 4,
-        temperature: float = 0.0
+        temperature: float = 0.0,
+        enable_logging: bool = True
     ):
         """
         Args:
@@ -209,11 +216,18 @@ class RAGChatbot:
             model: 사용할 LLM 모델명
             retrieval_k: 검색할 청크 개수
             temperature: LLM 응답의 창의성 (0=결정적, 1=창의적)
+            enable_logging: 로깅 활성화 여부
         """
         self.vectorstore_manager = vectorstore_manager
         self.retrieval_k = retrieval_k
+        self.model = model
+        self.temperature = temperature
         self.llm = ChatOpenAI(model=model, temperature=temperature)
         self.parser = StrOutputParser()
+
+        # 로깅 시스템 초기화
+        self.enable_logging = enable_logging
+        self.logger = ChatbotLogger() if enable_logging else None
 
         # 프롬프트 템플릿
         self.prompt = ChatPromptTemplate.from_messages([
@@ -227,18 +241,19 @@ class RAGChatbot:
 
         # RAG 체인 구성
         self.rag_chain = None
+        self.retriever = None
         self._build_chain()
 
     def _build_chain(self):
         """RAG 체인 구성"""
-        retriever = self.vectorstore_manager.get_retriever(k=self.retrieval_k)
+        self.retriever = self.vectorstore_manager.get_retriever(k=self.retrieval_k)
 
         def format_docs(docs_):
             return "\n\n".join([f"[문서 {i+1}]\n{d.page_content}" for i, d in enumerate(docs_)])
 
         self.rag_chain = (
             {
-                "context": retriever | format_docs,
+                "context": self.retriever | format_docs,
                 "question": RunnablePassthrough()
             }
             | self.prompt
@@ -247,14 +262,80 @@ class RAGChatbot:
         )
 
     def ask(self, question: str) -> str:
-        """질문에 대한 답변 생성"""
+        """질문에 대한 답변 생성 (로깅 지원)"""
         if not question.strip():
             return "질문을 입력해주세요."
 
+        # 전체 처리 시간 측정 시작
+        start_time = time.time()
+
         try:
-            answer = self.rag_chain.invoke(question)
+            # 로깅: 쿼리 시작
+            if self.logger:
+                self.logger.start_query(question)
+
+            # 1단계: 문서 검색 (Retrieval)
+            retrieved_docs = self.retriever.invoke(question)
+
+            # 로깅: 검색 결과
+            if self.logger:
+                self.logger.log_retrieval(
+                    retrieved_docs,
+                    {"k": self.retrieval_k}
+                )
+
+            # 2단계: 컨텍스트 포맷팅
+            formatted_context = "\n\n".join([
+                f"[문서 {i+1}]\n{d.page_content}"
+                for i, d in enumerate(retrieved_docs)
+            ])
+
+            # 로깅: 컨텍스트 준비
+            if self.logger:
+                self.logger.log_context_preparation(formatted_context)
+
+            # 3단계: 프롬프트 생성 및 LLM 요청
+            prompt_messages = self.prompt.invoke({
+                "context": formatted_context,
+                "question": question
+            })
+
+            # 로깅: LLM 요청
+            if self.logger:
+                prompt_str = str(prompt_messages)
+                self.logger.log_llm_request(prompt_str, self.model, self.temperature)
+
+            # LLM 처리 시간 측정
+            llm_start = time.time()
+            llm_response = self.llm.invoke(prompt_messages)
+            llm_time = time.time() - llm_start
+
+            # 4단계: 응답 파싱
+            answer = self.parser.invoke(llm_response)
+
+            # 로깅: LLM 응답
+            if self.logger:
+                self.logger.log_llm_response(answer, llm_time)
+
+            # 전체 처리 시간 계산
+            total_time = time.time() - start_time
+
+            # 로깅: 쿼리 완료
+            if self.logger:
+                self.logger.complete_query(answer, total_time)
+
             return answer
+
         except Exception as e:
+            # 로깅: 에러
+            if self.logger:
+                import traceback
+                self.logger.log_error(
+                    type(e).__name__,
+                    str(e),
+                    traceback.format_exc()
+                )
+
             return f"오류 발생: {str(e)}"
 
     def chat_loop(self):
@@ -265,7 +346,13 @@ class RAGChatbot:
         print("\n💡 사용법:")
         print("  - 문서에 대해 질문하세요")
         print("  - 'quit', 'exit', 'q'를 입력하면 종료됩니다")
-        print("  - 'help'를 입력하면 도움말을 볼 수 있습니다\n")
+        print("  - 'help'를 입력하면 도움말을 볼 수 있습니다")
+
+        if self.logger:
+            print(f"  - 'logs'를 입력하면 처리 로그를 볼 수 있습니다")
+            print(f"  - 'summary'를 입력하면 세션 요약을 볼 수 있습니다")
+            print(f"\n📝 로그 파일: {self.logger.log_file}")
+        print()
 
         conversation_count = 0
 
@@ -282,6 +369,16 @@ class RAGChatbot:
                 # 도움말
                 if user_input.lower() == 'help':
                     self._show_help()
+                    continue
+
+                # 로그 보기
+                if user_input.lower() == 'logs' and self.logger:
+                    self._show_logs()
+                    continue
+
+                # 세션 요약
+                if user_input.lower() == 'summary' and self.logger:
+                    self._show_summary()
                     continue
 
                 # 빈 입력 처리
@@ -316,8 +413,10 @@ class RAGChatbot:
           • "이 프로젝트의 목적은 무엇인가요?"
 
         명령어:
-          • help  - 이 도움말 표시
-          • quit  - 챗봇 종료 (또는 exit, q)
+          • help     - 이 도움말 표시
+          • logs     - 마지막 쿼리의 처리 과정 상세 로그 보기
+          • summary  - 현재 세션의 통계 요약 보기
+          • quit     - 챗봇 종료 (또는 exit, q)
 
         주의사항:
           • 챗봇은 제공된 문서의 내용만을 기반으로 답변합니다
@@ -325,6 +424,36 @@ class RAGChatbot:
         ─────────────────────────────────────────────────────
         """
         print(help_text)
+
+    def _show_logs(self):
+        """마지막 쿼리의 로그 출력"""
+        if not self.logger or not self.logger.session_logs:
+            print("\n⚠ 아직 처리된 쿼리가 없습니다.")
+            return
+
+        # 마지막 쿼리 로그 출력
+        last_query_log = self.logger.session_logs[-1]
+        LogViewer.print_query_log(last_query_log, verbose=True)
+
+    def _show_summary(self):
+        """세션 요약 출력"""
+        if not self.logger:
+            print("\n⚠ 로깅이 비활성화되어 있습니다.")
+            return
+
+        summary = self.logger.get_session_summary()
+
+        print("\n" + "="*60)
+        print("📊 세션 요약")
+        print("="*60)
+        print(f"세션 ID: {summary['session_id']}")
+        print(f"총 쿼리 수: {summary['total_queries']}")
+        print(f"  ✅ 성공: {summary['successful_queries']}")
+        print(f"  ❌ 실패: {summary['failed_queries']}")
+        if summary['average_processing_time'] > 0:
+            print(f"평균 처리 시간: {summary['average_processing_time']:.3f}초")
+        print(f"로그 파일: {summary['log_file']}")
+        print("="*60)
 
 
 # ============================================================
