@@ -18,6 +18,7 @@ import os
 import glob
 import sys
 import time
+
 from typing import List, Optional
 
 # LangChain 핵심 컴포넌트
@@ -36,6 +37,7 @@ from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader, Tex
 from chatbot_logger import ChatbotLogger, LogViewer
 
 
+
 # ============================================================
 # 문서 처리 클래스
 # ============================================================
@@ -51,12 +53,14 @@ class DocumentProcessor:
             chunk_overlap: 인접 청크 간 중복 문자 수 (Korean slide PDF optimized: 150)
             min_chunk_size: 최소 청크 크기 (필터링 기준)
             logger: 로깅 시스템 (선택적)
+
         """
         self.docs_dir = docs_dir
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
         self.logger = logger
+
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
@@ -100,6 +104,7 @@ class DocumentProcessor:
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
         """문서를 작은 청크로 분할 및 필터링"""
+
         chunks = self.splitter.split_documents(documents)
 
         if not chunks:
@@ -141,6 +146,7 @@ class DocumentProcessor:
             return False
 
         return True
+
 
 
 # ============================================================
@@ -248,6 +254,7 @@ class VectorStoreManager:
             return self.vectordb.as_retriever(search_kwargs={"k": k})
 
 
+
 # ============================================================
 # RAG 챗봇 클래스
 # ============================================================
@@ -263,6 +270,7 @@ class RAGChatbot:
         search_type: str = "mmr",
         temperature: float = 0.0,
         enable_logging: bool = True
+
     ):
         """
         Args:
