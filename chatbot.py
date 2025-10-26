@@ -550,9 +550,24 @@ class RAGChatbot:
             print("\n⚠ 아직 처리된 쿼리가 없습니다.")
             return
 
-        # 마지막 쿼리 로그 출력
+        # 마지막 쿼리 로그 출력 (간결한 버전)
         last_query_log = self.logger.session_logs[-1]
-        LogViewer.print_query_log(last_query_log, verbose=True)
+
+        print("\n" + "="*70)
+        print("💡 로그 보기 옵션:")
+        print("="*70)
+        print("  [1] 🎯 간단히 보기 (추천 - 초보자용)")
+        print("  [2] 📊 상세히 보기 (개발자용)")
+        print("="*70)
+
+        choice = input("\n선택 (1/2, 기본값=1): ").strip() or "1"
+
+        if choice == "1":
+            # 간결한 흐름 표시
+            LogViewer.print_simple_flow(last_query_log)
+        else:
+            # 상세 로그 표시
+            LogViewer.print_query_log(last_query_log, verbose=True)
 
     def _show_summary(self):
         """세션 요약 출력"""

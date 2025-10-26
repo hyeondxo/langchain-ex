@@ -370,6 +370,80 @@ class LogViewer:
     """로그를 사람이 읽기 쉬운 형태로 출력하는 유틸리티"""
 
     @staticmethod
+    def print_simple_flow(query_log: Dict[str, Any]):
+        """
+        초보자를 위한 간결한 흐름 시각화
+
+        Args:
+            query_log: 쿼리 로그 딕셔너리
+        """
+        print("\n" + "━"*70)
+        print("🔍 질문 처리 흐름")
+        print("━"*70)
+
+        # 1. 사용자 질문
+        user_input = query_log.get('user_input', '')
+        print(f"\n1️⃣  사용자 질문")
+        print(f"    💬 \"{user_input}\"")
+
+        # 2. 문서 검색
+        retrieval_step = next((s for s in query_log.get('processing_steps', []) if s['step_type'] == 'RETRIEVAL'), None)
+        if retrieval_step:
+            data = retrieval_step.get('data', {})
+            num_docs = data.get('num_documents', 0)
+            print(f"\n    ↓")
+            print(f"\n2️⃣  문서 검색")
+            print(f"    🔎 벡터DB에서 관련 문서 {num_docs}개 검색")
+
+            # 검색된 문서 간단히 표시
+            docs = data.get('documents', [])
+            if docs:
+                print(f"    📄 검색 결과:")
+                for i, doc in enumerate(docs[:3], 1):  # 상위 3개만
+                    source = doc.get('metadata', {}).get('source', 'unknown')
+                    if isinstance(source, str):
+                        source = source.split('/')[-1]  # 파일명만
+                    print(f"       [{i}] {source} ({doc.get('content_length', 0)}자)")
+                if len(docs) > 3:
+                    print(f"       ... 외 {len(docs)-3}개 문서")
+
+        # 3. 컨텍스트 준비
+        context_step = next((s for s in query_log.get('processing_steps', []) if s['step_type'] == 'CONTEXT_PREP'), None)
+        if context_step:
+            data = context_step.get('data', {})
+            num_chunks = data.get('num_chunks_used', 0)
+            context_len = data.get('context_length', 0)
+            print(f"\n    ↓")
+            print(f"\n3️⃣  컨텍스트 준비")
+            print(f"    📝 {num_chunks}개 문서를 AI가 읽을 수 있도록 정리 ({context_len:,}자)")
+
+        # 4. AI 응답 생성
+        llm_step = next((s for s in query_log.get('processing_steps', []) if s['step_type'] == 'LLM_RESPONSE'), None)
+        if llm_step:
+            data = llm_step.get('data', {})
+            response_len = data.get('response_length', 0)
+            processing_time = data.get('processing_time_seconds', 0)
+            print(f"\n    ↓")
+            print(f"\n4️⃣  AI 답변 생성")
+            print(f"    🤖 GPT 모델이 문서를 바탕으로 답변 작성")
+            print(f"    ⏱️  처리 시간: {processing_time:.2f}초")
+
+        # 5. 최종 답변
+        final_response = query_log.get('final_response', '')
+        if final_response:
+            print(f"\n    ↓")
+            print(f"\n5️⃣  최종 답변")
+            print(f"    ✅ \"{final_response[:100]}{'...' if len(final_response) > 100 else ''}\"")
+
+        # 전체 처리 시간
+        total_time = query_log.get('metrics', {}).get('total_processing_time', 0)
+        if total_time:
+            print(f"\n━"*70)
+            print(f"⏱️  전체 처리 시간: {total_time:.2f}초")
+
+        print("━"*70)
+
+    @staticmethod
     def print_query_log(query_log: Dict[str, Any], verbose: bool = False):
         """
         쿼리 로그를 포맷하여 출력

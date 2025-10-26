@@ -67,19 +67,41 @@ def main():
             while True:
                 print("\n" + "─"*80)
                 print("\n옵션:")
-                print("  [번호] - 해당 쿼리의 상세 로그 보기")
-                print("  [all]  - 모든 쿼리의 상세 로그 보기")
-                print("  [back] - 로그 파일 목록으로 돌아가기")
+                print("  [번호]   - 해당 쿼리의 로그 보기")
+                print("  [all]    - 모든 쿼리의 로그 보기")
+                print("  [simple] - 간단히 보기 모드")
+                print("  [detail] - 상세히 보기 모드")
+                print("  [back]   - 로그 파일 목록으로 돌아가기")
 
                 query_choice = input("\n선택: ").strip().lower()
 
                 if query_choice == 'back':
                     break
 
+                # 표시 모드 설정
+                view_mode = 'simple'  # 기본값: 간단히 보기
+
+                if query_choice == 'simple':
+                    view_mode = 'simple'
+                    print("\n✅ 간단히 보기 모드로 설정됨")
+                    continue
+                elif query_choice == 'detail':
+                    view_mode = 'detail'
+                    print("\n✅ 상세히 보기 모드로 설정됨")
+                    continue
+
                 if query_choice == 'all':
                     # 모든 쿼리 출력
+                    print("\n로그 보기 모드를 선택하세요:")
+                    print("  [1] 🎯 간단히 보기 (추천)")
+                    print("  [2] 📊 상세히 보기")
+                    mode_choice = input("선택 (1/2, 기본값=1): ").strip() or "1"
+
                     for query_log in queries:
-                        LogViewer.print_query_log(query_log, verbose=True)
+                        if mode_choice == "1":
+                            LogViewer.print_simple_flow(query_log)
+                        else:
+                            LogViewer.print_query_log(query_log, verbose=True)
                         print("\n" + "─"*80)
                     continue
 
@@ -90,8 +112,16 @@ def main():
                         print("⚠ 잘못된 번호입니다.")
                         continue
 
-                    # 선택한 쿼리의 상세 로그 출력
-                    LogViewer.print_query_log(queries[query_index], verbose=True)
+                    # 선택한 쿼리의 로그 출력 (모드 선택)
+                    print("\n로그 보기 모드를 선택하세요:")
+                    print("  [1] 🎯 간단히 보기 (추천)")
+                    print("  [2] 📊 상세히 보기")
+                    mode_choice = input("선택 (1/2, 기본값=1): ").strip() or "1"
+
+                    if mode_choice == "1":
+                        LogViewer.print_simple_flow(queries[query_index])
+                    else:
+                        LogViewer.print_query_log(queries[query_index], verbose=True)
 
                 except ValueError:
                     print("⚠ 잘못된 입력입니다.")
