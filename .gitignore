@@ -46,4 +46,4 @@ chroma_db/
 *.db
 
 # Logs
-*.log
+/logs

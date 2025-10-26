@@ -17,6 +17,8 @@ load_dotenv()
 import os
 import glob
 import sys
+import time
+
 from typing import List, Optional
 
 # LangChain 핵심 컴포넌트
@@ -31,6 +33,10 @@ from langchain_core.documents import Document
 # 문서 로더
 from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader, TextLoader
 
+# 로깅 시스템
+from chatbot_logger import ChatbotLogger, LogViewer
+
+
 
 # ============================================================
 # 문서 처리 클래스
@@ -39,16 +45,22 @@ from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader, Tex
 class DocumentProcessor:
     """문서 로드 및 청크 분할을 담당하는 클래스"""
 
-    def __init__(self, docs_dir: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150):
+    def __init__(self, docs_dir: str = "docs", chunk_size: int = 600, chunk_overlap: int = 150, min_chunk_size: int = 80, logger: Optional[ChatbotLogger] = None):
         """
         Args:
             docs_dir: 문서가 저장된 디렉토리 경로
-            chunk_size: 각 청크의 최대 문자 수
-            chunk_overlap: 인접 청크 간 중복 문자 수
+            chunk_size: 각 청크의 최대 문자 수 (Korean slide PDF optimized: 600)
+            chunk_overlap: 인접 청크 간 중복 문자 수 (Korean slide PDF optimized: 150)
+            min_chunk_size: 최소 청크 크기 (필터링 기준)
+            logger: 로깅 시스템 (선택적)
+
         """
         self.docs_dir = docs_dir
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.min_chunk_size = min_chunk_size
+        self.logger = logger
+
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
@@ -91,7 +103,8 @@ class DocumentProcessor:
         return docs
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
-        """문서를 작은 청크로 분할"""
+        """문서를 작은 청크로 분할 및 필터링"""
+
         chunks = self.splitter.split_documents(documents)
 
         if not chunks:
@@ -100,8 +113,40 @@ class DocumentProcessor:
                 "chunk_size를 조정하거나 문서 내용을 확인해주세요."
             )
 
-        print(f"📄 {len(chunks)}개의 청크로 분할 완료 (크기: {self.chunk_size}, 중복: {self.chunk_overlap})")
-        return chunks
+        # 유효한 청크만 필터링
+        original_count = len(chunks)
+        filtered_chunks = [
+            chunk for chunk in chunks
+            if self._is_valid_chunk(chunk.page_content)
+        ]
+
+        if not filtered_chunks:
+            raise ValueError(
+                f"유효한 청크가 없습니다. 모든 {original_count}개 청크가 필터링되었습니다.\n"
+                f"min_chunk_size({self.min_chunk_size})를 조정해주세요."
+            )
+
+        filtered_count = original_count - len(filtered_chunks)
+        print(f"📄 {len(filtered_chunks)}개의 청크로 분할 완료 (크기: {self.chunk_size}, 중복: {self.chunk_overlap})")
+        if filtered_count > 0:
+            print(f"   ⚠ {filtered_count}개의 작은 청크 필터링됨 (최소 크기: {self.min_chunk_size})")
+
+        return filtered_chunks
+
+    def _is_valid_chunk(self, content: str) -> bool:
+        """청크 유효성 검사"""
+        # 최소 길이 체크
+        if len(content.strip()) < self.min_chunk_size:
+            return False
+
+        # 헤더만 있는 청크 필터링 (예: "#1 SWAP", "#2 Team Git")
+        lines = content.strip().split('\n')
+        if len(lines) == 1 and len(content) < 150:
+            # 단일 라인이고 짧은 경우 (헤더일 가능성 높음)
+            return False
+
+        return True
+
 
 
 # ============================================================
@@ -181,12 +226,33 @@ class VectorStoreManager:
         print(f"✓ 기존 벡터DB 로드 완료: {self.persist_directory}")
         return self.vectordb
 
-    def get_retriever(self, k: int = 4):
-        """벡터DB로부터 Retriever 생성"""
+    def get_retriever(self, k: int = 8, search_type: str = "mmr"):
+        """
+        벡터DB로부터 Retriever 생성
+
+        Args:
+            k: 반환할 문서 개수 (기본값 8로 증가)
+            search_type: 검색 유형 ("similarity" 또는 "mmr")
+                - "similarity": 단순 유사도 검색
+                - "mmr": Maximal Marginal Relevance (다양성 고려)
+        """
         if not self.vectordb:
             raise ValueError("벡터DB가 초기화되지 않았습니다.")
 
-        return self.vectordb.as_retriever(search_kwargs={"k": k})
+        if search_type == "mmr":
+            # MMR: 유사도와 다양성의 균형
+            return self.vectordb.as_retriever(
+                search_type="mmr",
+                search_kwargs={
+                    "k": k,
+                    "fetch_k": k * 3,  # 후보군은 3배로 확보
+                    "lambda_mult": 0.7  # 0.7 = 유사도 70%, 다양성 30%
+                }
+            )
+        else:
+            # 기본 유사도 검색
+            return self.vectordb.as_retriever(search_kwargs={"k": k})
+
 
 
 # ============================================================
@@ -200,45 +266,83 @@ class RAGChatbot:
         self,
         vectorstore_manager: VectorStoreManager,
         model: str = "gpt-4o-mini",
-        retrieval_k: int = 4,
-        temperature: float = 0.0
+        retrieval_k: int = 8,
+        search_type: str = "mmr",
+        temperature: float = 0.0,
+        enable_logging: bool = True
+
     ):
         """
         Args:
             vectorstore_manager: VectorStoreManager 인스턴스
             model: 사용할 LLM 모델명
-            retrieval_k: 검색할 청크 개수
+            retrieval_k: 검색할 청크 개수 (기본값 8로 증가)
+            search_type: 검색 유형 ("similarity" 또는 "mmr")
             temperature: LLM 응답의 창의성 (0=결정적, 1=창의적)
+            enable_logging: 로깅 활성화 여부
         """
         self.vectorstore_manager = vectorstore_manager
         self.retrieval_k = retrieval_k
+        self.search_type = search_type
+        self.model = model
+        self.temperature = temperature
         self.llm = ChatOpenAI(model=model, temperature=temperature)
         self.parser = StrOutputParser()
+
+        # 로깅 시스템 초기화
+        self.enable_logging = enable_logging
+        self.logger = ChatbotLogger() if enable_logging else None
+
+        # 벡터 DB 정보 로깅
+        if self.logger and self.vectorstore_manager.vectordb:
+            try:
+                # ChromaDB에서 총 청크 수 조회
+                collection = self.vectorstore_manager.vectordb._collection
+                total_chunks = collection.count()
+
+                self.logger.start_query("System Initialization")
+                self.logger.log_vectordb_info(
+                    collection_name=self.vectorstore_manager.collection_name,
+                    total_chunks=total_chunks,
+                    embedding_model="text-embedding-3-small"
+                )
+                self.logger.complete_query("System initialized", 0)
+            except Exception as e:
+                # 벡터 DB 정보 조회 실패 시 무시
+                pass
 
         # 프롬프트 템플릿
         self.prompt = ChatPromptTemplate.from_messages([
             ("system",
              "당신은 문서 기반 AI 어시스턴트입니다. "
-             "주어진 컨텍스트만을 근거로 정확하고 간결하게 한국어로 답변하세요. "
-             "컨텍스트에 없는 정보는 '제공된 문서에서는 해당 정보를 찾을 수 없습니다'라고 답하세요.\n\n"
+             "주어진 컨텍스트를 근거로 정확하고 간결하게 한국어로 답변하세요.\n\n"
+             "중요한 지침:\n"
+             "1. 컨텍스트에 관련 정보가 있으면 반드시 활용하여 답변하세요.\n"
+             "2. '분담', '스크럼', '공유'와 같은 표현도 협업의 일부입니다.\n"
+             "3. 부분적인 정보라도 있다면 그것을 바탕으로 답변하세요.\n"
+             "4. 정말로 관련 정보가 전혀 없을 때만 '제공된 문서에서는 해당 정보를 찾을 수 없습니다'라고 답하세요.\n\n"
              "컨텍스트:\n{context}"),
             ("user", "{question}")
         ])
 
         # RAG 체인 구성
         self.rag_chain = None
+        self.retriever = None
         self._build_chain()
 
     def _build_chain(self):
         """RAG 체인 구성"""
-        retriever = self.vectorstore_manager.get_retriever(k=self.retrieval_k)
+        self.retriever = self.vectorstore_manager.get_retriever(
+            k=self.retrieval_k,
+            search_type=self.search_type
+        )
 
         def format_docs(docs_):
             return "\n\n".join([f"[문서 {i+1}]\n{d.page_content}" for i, d in enumerate(docs_)])
 
         self.rag_chain = (
             {
-                "context": retriever | format_docs,
+                "context": self.retriever | format_docs,
                 "question": RunnablePassthrough()
             }
             | self.prompt
@@ -246,15 +350,111 @@ class RAGChatbot:
             | self.parser
         )
 
+    def _expand_query(self, question: str) -> str:
+        """
+        쿼리 확장: 동의어와 관련 용어 추가
+
+        예: "협업" → "협업, 분담, 스크럼, 공유, 커뮤니케이션"
+        """
+        # 협업 관련 용어 확장
+        if "협업" in question:
+            question = question + " 분담 스크럼 공유 커뮤니케이션 브랜치 코어타임"
+
+        return question
+
     def ask(self, question: str) -> str:
-        """질문에 대한 답변 생성"""
+        """질문에 대한 답변 생성 (로깅 지원)"""
         if not question.strip():
             return "질문을 입력해주세요."
 
+        # 전체 처리 시간 측정 시작
+        start_time = time.time()
+
         try:
-            answer = self.rag_chain.invoke(question)
+            # 로깅: 쿼리 시작
+            if self.logger:
+                self.logger.start_query(question)
+
+            # 쿼리 확장 (검색 성능 향상)
+            expanded_query = self._expand_query(question)
+
+            # 1단계: 문서 검색 (Retrieval)
+            retrieved_docs = self.retriever.invoke(expanded_query)
+
+            # 로깅: 검색 결과 (쿼리 포함)
+            if self.logger:
+                self.logger.log_retrieval(
+                    retrieved_docs,
+                    {"k": self.retrieval_k},
+                    query=question
+                )
+
+            # 2단계: 컨텍스트 포맷팅
+            formatted_context = "\n\n".join([
+                f"[문서 {i+1}]\n{d.page_content}"
+                for i, d in enumerate(retrieved_docs)
+            ])
+
+            # 청크 사용 흐름 추적
+            chunk_usage = []
+            for i, doc in enumerate(retrieved_docs):
+                chunk_info = {
+                    "chunk_index": i,
+                    "rank": i + 1,
+                    "source": doc.metadata.get('source', 'unknown') if hasattr(doc, 'metadata') else 'unknown',
+                    "page": doc.metadata.get('page', 'N/A') if hasattr(doc, 'metadata') else 'N/A',
+                    "chunk_size": len(doc.page_content),
+                    "usage": f"Included in context as Document {i+1}",
+                    "position_in_context": f"Document {i+1} of {len(retrieved_docs)}"
+                }
+                chunk_usage.append(chunk_info)
+
+            # 로깅: 컨텍스트 준비 (청크 사용 흐름 포함)
+            if self.logger:
+                self.logger.log_context_preparation(formatted_context, chunk_usage)
+
+            # 3단계: 프롬프트 생성 및 LLM 요청
+            prompt_messages = self.prompt.invoke({
+                "context": formatted_context,
+                "question": question
+            })
+
+            # 로깅: LLM 요청
+            if self.logger:
+                prompt_str = str(prompt_messages)
+                self.logger.log_llm_request(prompt_str, self.model, self.temperature)
+
+            # LLM 처리 시간 측정
+            llm_start = time.time()
+            llm_response = self.llm.invoke(prompt_messages)
+            llm_time = time.time() - llm_start
+
+            # 4단계: 응답 파싱
+            answer = self.parser.invoke(llm_response)
+
+            # 로깅: LLM 응답
+            if self.logger:
+                self.logger.log_llm_response(answer, llm_time)
+
+            # 전체 처리 시간 계산
+            total_time = time.time() - start_time
+
+            # 로깅: 쿼리 완료
+            if self.logger:
+                self.logger.complete_query(answer, total_time)
+
             return answer
+
         except Exception as e:
+            # 로깅: 에러
+            if self.logger:
+                import traceback
+                self.logger.log_error(
+                    type(e).__name__,
+                    str(e),
+                    traceback.format_exc()
+                )
+
             return f"오류 발생: {str(e)}"
 
     def chat_loop(self):
@@ -265,7 +465,13 @@ class RAGChatbot:
         print("\n💡 사용법:")
         print("  - 문서에 대해 질문하세요")
         print("  - 'quit', 'exit', 'q'를 입력하면 종료됩니다")
-        print("  - 'help'를 입력하면 도움말을 볼 수 있습니다\n")
+        print("  - 'help'를 입력하면 도움말을 볼 수 있습니다")
+
+        if self.logger:
+            print(f"  - 'logs'를 입력하면 처리 로그를 볼 수 있습니다")
+            print(f"  - 'summary'를 입력하면 세션 요약을 볼 수 있습니다")
+            print(f"\n📝 로그 파일: {self.logger.log_file}")
+        print()
 
         conversation_count = 0
 
@@ -282,6 +488,16 @@ class RAGChatbot:
                 # 도움말
                 if user_input.lower() == 'help':
                     self._show_help()
+                    continue
+
+                # 로그 보기
+                if user_input.lower() == 'logs' and self.logger:
+                    self._show_logs()
+                    continue
+
+                # 세션 요약
+                if user_input.lower() == 'summary' and self.logger:
+                    self._show_summary()
                     continue
 
                 # 빈 입력 처리
@@ -316,8 +532,10 @@ class RAGChatbot:
           • "이 프로젝트의 목적은 무엇인가요?"
 
         명령어:
-          • help  - 이 도움말 표시
-          • quit  - 챗봇 종료 (또는 exit, q)
+          • help     - 이 도움말 표시
+          • logs     - 마지막 쿼리의 처리 과정 상세 로그 보기
+          • summary  - 현재 세션의 통계 요약 보기
+          • quit     - 챗봇 종료 (또는 exit, q)
 
         주의사항:
           • 챗봇은 제공된 문서의 내용만을 기반으로 답변합니다
@@ -325,6 +543,36 @@ class RAGChatbot:
         ─────────────────────────────────────────────────────
         """
         print(help_text)
+
+    def _show_logs(self):
+        """마지막 쿼리의 로그 출력"""
+        if not self.logger or not self.logger.session_logs:
+            print("\n⚠ 아직 처리된 쿼리가 없습니다.")
+            return
+
+        # 마지막 쿼리 로그 출력
+        last_query_log = self.logger.session_logs[-1]
+        LogViewer.print_query_log(last_query_log, verbose=True)
+
+    def _show_summary(self):
+        """세션 요약 출력"""
+        if not self.logger:
+            print("\n⚠ 로깅이 비활성화되어 있습니다.")
+            return
+
+        summary = self.logger.get_session_summary()
+
+        print("\n" + "="*60)
+        print("📊 세션 요약")
+        print("="*60)
+        print(f"세션 ID: {summary['session_id']}")
+        print(f"총 쿼리 수: {summary['total_queries']}")
+        print(f"  ✅ 성공: {summary['successful_queries']}")
+        print(f"  ❌ 실패: {summary['failed_queries']}")
+        if summary['average_processing_time'] > 0:
+            print(f"평균 처리 시간: {summary['average_processing_time']:.3f}초")
+        print(f"로그 파일: {summary['log_file']}")
+        print("="*60)
 
 
 # ============================================================
@@ -369,7 +617,8 @@ def main():
         chatbot = RAGChatbot(
             vectorstore_manager=vectorstore_manager,
             model="gpt-4o-mini",
-            retrieval_k=4
+            retrieval_k=8,  # 증가된 검색 개수
+            search_type="mmr"  # MMR 검색으로 다양성 확보
         )
 
         print("\n✓ 챗봇 준비 완료!\n")
