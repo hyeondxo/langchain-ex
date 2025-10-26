@@ -80,49 +80,97 @@ class ChatbotLogger:
 
         return query_id
 
-    def log_retrieval(self, retrieved_docs: List[Any], search_kwargs: Dict[str, Any]):
+    def log_retrieval(self, retrieved_docs: List[Any], search_kwargs: Dict[str, Any], query: str = ""):
         """
-        문서 검색 결과 로그
+        문서 검색 결과 로그 (유사도 점수 및 랭킹 포함)
 
         Args:
             retrieved_docs: 검색된 문서 리스트
             search_kwargs: 검색 파라미터 (k값 등)
+            query: 검색 쿼리 (선택적)
         """
         docs_info = []
         for i, doc in enumerate(retrieved_docs):
+            # 유사도 점수 추출 (있는 경우)
+            similarity_score = None
+            if hasattr(doc, 'metadata') and isinstance(doc.metadata, dict):
+                similarity_score = doc.metadata.get('score') or doc.metadata.get('similarity')
+
             doc_data = {
+                "rank": i + 1,
                 "index": i,
                 "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
                 "content_length": len(doc.page_content),
-                "metadata": doc.metadata if hasattr(doc, 'metadata') else {}
+                "full_content": doc.page_content,  # 전체 내용 저장
+                "metadata": doc.metadata if hasattr(doc, 'metadata') else {},
+                "similarity_score": similarity_score
             }
             docs_info.append(doc_data)
 
+        # 검색 품질 메트릭
+        avg_chunk_size = sum(len(d.page_content) for d in retrieved_docs) / len(retrieved_docs) if retrieved_docs else 0
+        total_context_size = sum(len(d.page_content) for d in retrieved_docs)
+
         self._log_step(
             "RETRIEVAL",
-            f"Retrieved {len(retrieved_docs)} documents",
+            f"Retrieved top-{len(retrieved_docs)} documents from vector DB",
             {
+                "query": query,
                 "num_documents": len(retrieved_docs),
                 "search_params": search_kwargs,
-                "documents": docs_info
+                "documents": docs_info,
+                "metrics": {
+                    "avg_chunk_size": round(avg_chunk_size, 2),
+                    "total_context_size": total_context_size,
+                    "min_chunk_size": min(len(d.page_content) for d in retrieved_docs) if retrieved_docs else 0,
+                    "max_chunk_size": max(len(d.page_content) for d in retrieved_docs) if retrieved_docs else 0
+                }
             }
         )
 
-    def log_context_preparation(self, formatted_context: str):
+    def log_vectordb_info(self, collection_name: str, total_chunks: int, embedding_model: str):
         """
-        컨텍스트 준비 로그
+        벡터 DB 저장 정보 로그
+
+        Args:
+            collection_name: 벡터 DB 컬렉션 이름
+            total_chunks: 저장된 총 청크 수
+            embedding_model: 사용된 임베딩 모델
+        """
+        self._log_step(
+            "VECTORDB_INFO",
+            f"Vector DB initialized with {total_chunks} chunks",
+            {
+                "collection_name": collection_name,
+                "total_chunks_stored": total_chunks,
+                "embedding_model": embedding_model,
+                "retrieval_method": "similarity_search"
+            }
+        )
+
+    def log_context_preparation(self, formatted_context: str, chunk_usage: List[Dict[str, Any]] = None):
+        """
+        컨텍스트 준비 로그 (청크 사용 흐름 추적)
 
         Args:
             formatted_context: LLM에 전달할 포맷된 컨텍스트
+            chunk_usage: 각 청크가 어떻게 사용되었는지에 대한 정보
         """
+        data = {
+            "context_length": len(formatted_context),
+            "context_preview": formatted_context[:300] + "..." if len(formatted_context) > 300 else formatted_context,
+            "full_context": formatted_context
+        }
+
+        # 청크 사용 정보 추가
+        if chunk_usage:
+            data["chunk_usage_flow"] = chunk_usage
+            data["num_chunks_used"] = len(chunk_usage)
+
         self._log_step(
             "CONTEXT_PREP",
-            "Context formatted for LLM",
-            {
-                "context_length": len(formatted_context),
-                "context_preview": formatted_context[:300] + "..." if len(formatted_context) > 300 else formatted_context,
-                "full_context": formatted_context
-            }
+            "Context formatted for LLM with chunk flow tracking",
+            data
         )
 
     def log_llm_request(self, prompt: str, model: str, temperature: float):
@@ -354,15 +402,51 @@ class LogViewer:
                 data = step.get('data', {})
 
                 if step_type == "RETRIEVAL":
+                    print(f"      Query: {data.get('query', 'N/A')}")
                     print(f"      Retrieved {data.get('num_documents')} documents")
+
+                    # 메트릭 출력
+                    if 'metrics' in data:
+                        metrics = data['metrics']
+                        print(f"      Metrics:")
+                        print(f"        - Avg chunk size: {metrics.get('avg_chunk_size', 0)} chars")
+                        print(f"        - Total context: {metrics.get('total_context_size', 0)} chars")
+                        print(f"        - Min/Max chunk: {metrics.get('min_chunk_size', 0)}/{metrics.get('max_chunk_size', 0)} chars")
+
+                    # 문서 상세 정보
                     if 'documents' in data:
-                        for doc in data['documents'][:3]:  # 처음 3개만 출력
-                            print(f"        - Doc {doc['index']}: {doc['content_preview'][:100]}...")
+                        print(f"      Documents:")
+                        for doc in data['documents'][:5]:  # 처음 5개 출력
+                            rank = doc.get('rank', doc.get('index', 0) + 1)
+                            print(f"        [{rank}] Chunk {doc['index']} ({doc['content_length']} chars)")
+                            if doc.get('similarity_score'):
+                                print(f"            Similarity: {doc['similarity_score']}")
+                            if doc.get('metadata'):
+                                source = doc['metadata'].get('source', 'unknown')
+                                page = doc['metadata'].get('page', 'N/A')
+                                print(f"            Source: {source}, Page: {page}")
+                            print(f"            Preview: {doc['content_preview'][:150]}...")
+
+                elif step_type == "VECTORDB_INFO":
+                    print(f"      Collection: {data.get('collection_name')}")
+                    print(f"      Total chunks stored: {data.get('total_chunks_stored')}")
+                    print(f"      Embedding model: {data.get('embedding_model')}")
+                    print(f"      Retrieval method: {data.get('retrieval_method')}")
 
                 elif step_type == "CONTEXT_PREP":
                     print(f"      Context length: {data.get('context_length')} chars")
+
+                    # 청크 사용 흐름 표시
+                    if 'chunk_usage_flow' in data:
+                        print(f"      Chunk Usage Flow:")
+                        for chunk in data['chunk_usage_flow']:
+                            print(f"        [{chunk['rank']}] Chunk {chunk['chunk_index']}: {chunk['chunk_size']} chars")
+                            print(f"            Source: {chunk['source']}, Page: {chunk['page']}")
+                            print(f"            Usage: {chunk['usage']}")
+                            print(f"            Position: {chunk['position_in_context']}")
+
                     if 'context_preview' in data:
-                        print(f"      Preview: {data['context_preview'][:150]}...")
+                        print(f"      Context Preview: {data['context_preview'][:150]}...")
 
                 elif step_type == "LLM_RESPONSE":
                     print(f"      Response length: {data.get('response_length')} chars")
